@@ -3,9 +3,6 @@ import os
 import time
 import torch
 import shutil
-import numpy as np
-from PIL import Image
-from transformers import DPTFeatureExtractor, DPTForDepthEstimation
 from diffusers import ControlNetModel, StableDiffusionXLControlNetPipeline, AutoencoderKL
 from diffusers.utils import load_image
 
@@ -23,9 +20,7 @@ class Predictor(BasePredictor):
     def setup(self):
         """Load the model into memory to make running multiple predictions efficient"""
         t1 = time.time()
-        print("Loading depth feature extractor")
-        self.depth_estimator = DPTForDepthEstimation.from_pretrained(FEATURE_CACHE).to("cuda")
-        self.feature_extractor = DPTFeatureExtractor.from_pretrained(FEATURE_CACHE)
+
         print("Loading controlnet depth model")
         controlnet = ControlNetModel.from_pretrained(
             CONTROL_CACHE,
@@ -54,27 +49,6 @@ class Predictor(BasePredictor):
         shutil.copyfile(path, "/tmp/image.png")
         return load_image("/tmp/image.png").convert("RGB")
     
-    def get_depth_map(self, image):
-        image = self.feature_extractor(images=image, return_tensors="pt").pixel_values.to("cuda")
-        with torch.no_grad(), torch.autocast("cuda"):
-            depth_map = self.depth_estimator(image).predicted_depth
-
-        height, width = image.shape[2], image.shape[3]
-
-        depth_map = torch.nn.functional.interpolate(
-            depth_map.unsqueeze(1),
-            size=(height, width),
-            mode="bicubic",
-            align_corners=False,
-        )
-        depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
-        depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
-        depth_map = (depth_map - depth_min) / (depth_max - depth_min)
-        image = torch.cat([depth_map] * 3, dim=1)
-        image = image.permute(0, 2, 3, 1).cpu().numpy()[0]
-        image = Image.fromarray((image * 255.0).clip(0, 255).astype(np.uint8))
-        return image
-
     def resize_to_allowed_dimensions(self, width, height):
         # List of SDXL dimensions
         allowed_dimensions = [
@@ -87,7 +61,7 @@ class Predictor(BasePredictor):
             (1152, 896), (1152, 832), (1216, 832), (1280, 768),
             (1344, 768), (1408, 704), (1472, 704), (1536, 640),
             (1600, 640), (1664, 576), (1728, 576), (1792, 576),
-            (1856, 512), (1920, 512), (1984, 512), (2048, 512)
+            (1856, 512), (1920, 512), (1984, 512), (2048, 512),
         ]
         # Calculate the aspect ratio
         aspect_ratio = width / height
@@ -103,12 +77,12 @@ class Predictor(BasePredictor):
     def predict(
         self,
         image: Path = Input(
-            description="Input image for controlnet",
+            description="Depth input image",
             default=None,
         ),
         prompt: str = Input(
             description="Input prompt",
-            default="spiderman lecture, photorealistic",
+            default="isometric restaurant interior, table and chairs at the centre with a tea set, plants hung from the walls, arched window on the right. Art deco. Glamorous, Luxurious, Elegant, Stylish, gold trim, scallop motifs, antique, 20th century decor, 20s style",
         ),
         num_inference_steps: int = Input(
             description="Number of inference steps", ge=1, le=100, default=30
@@ -134,12 +108,10 @@ class Predictor(BasePredictor):
         print("Original width:"+str(image_width)+", height:"+str(image_height))
         new_width, new_height = self.resize_to_allowed_dimensions(image_width, image_height)
         print("new_width:"+str(new_width)+", new_height:"+str(new_height))
-
-        depth_image = self.get_depth_map(image)
-
+        
         images = self.pipe(
             prompt,
-            image=depth_image,
+            image=image,
             num_inference_steps=num_inference_steps,
             controlnet_conditioning_scale=condition_scale,
             width=new_width,
